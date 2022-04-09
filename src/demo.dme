@@ -1,0 +1,239 @@
+#include "shared.h"
+
+#define PARAM0 buf[offset + 0]
+#define PARAM1 buf[offset + 1]
+#define PARAM2 buf[offset + 2]
+#define LI_CHECK(a) if(PARAM0) CRASH(a)
+
+/var/icon
+	black
+	white
+	red
+
+/var/list
+	buf
+	clients
+
+/var
+	initialized
+	paused
+	offset
+
+/client
+	view = 33
+	perspective = EDGE_PERSPECTIVE
+
+/client/New()
+	. = ..()
+
+	mob.icon = red
+
+	spawn
+		winset(src, null, {"\
+mainwindow.statusbar=false
+mainwindow.menu=
+mainwindow.mainvsplit.show-splitter=false
+mainwindow.mainvsplit.right=
+mainwindow.mainvsplit.pos=0,0
+mainwindow.mainvsplit.size=mainwindow.size
+mainwindow.mainvsplit.anchor1=0x0
+mainwindow.mainvsplit.anchor2=100x100
+mapwindow.map.zoom=0.25
+mapwindow.map.zoom-mode=distort
+mapwindow.map.background-color=#66ccff
+mapwindow.map.text-mode=false
+mainwindow.input.is-visible=false
+mainwindow.input.is-disabled=true
+mainwindow.saybutton.is-visible=false
+mainwindow.saybutton.is-disabled=true
+mainwindow.macrobutton.is-visible=false
+mainwindow.macrobutton.is-disabled=true
+mainwindow.hostb.is-visible=false
+mainwindow.hostb.is-disabled=true
+mainwindow.focus=true"})
+
+		winset(src, "macro", {"\
+parent=macro
+name=escape
+command=abort"})
+
+		winset(src, "macro", {"\
+parent=macro
+name=space
+command=pause"})
+
+		winset(src, "infolabel", {"\
+parent=mainwindow
+type=label
+pos=0,0
+size=200x48
+align=top-left
+text=\"if you can read this shit's fucked\""})
+
+		clients += src
+
+/client/verb/pause()
+	set instant = 1
+	paused = !paused
+
+/client/verb/abort()
+	set instant = 1
+	shutdown()
+
+/client/MouseDown(atom/a)
+	if(istype(a))
+		var/i = (a.x - 1) + (a.y - 1) * world.maxx
+		var/live = !buf[offset + DATA_OFFSET + i]
+		buf[offset + DATA_OFFSET + i] = live
+		if(live) a.icon = white
+		else a.icon = black
+
+/world
+	fps = 100
+	cache_lifespan = 0
+	loop_checks = 0
+	name = "dm<>cuda demo"
+
+/world/New()
+	initialized = FALSE
+	paused = FALSE
+	clients = list()
+
+	. = ..()
+
+	/* dimensions should be powers of 2 */
+	maxx = 64
+	maxy = 64
+	maxz = 1
+
+	black = icon('blank.bmp')
+	black.SwapColor("#00000000", "#000000ff")
+
+	white = icon('blank.bmp')
+	white.SwapColor("#00000000", "#ffffffff")
+
+	red = icon('blank.bmp')
+	red.SwapColor("#00000000", "#ff0000ff")
+
+	spawn
+		buf = list()
+		/*
+			[NPARAMETERS (8)] general purpose parameters used by dm, native, and device
+			[maxx * maxy] cell data
+			[1024] padding for alignment and exclusive use of pages
+		*/
+		buf.len = NPARAMETERS + maxx * maxy + 1024
+
+		/* commit pages, assign type to number */
+		for(var/i=1 to buf.len)
+			buf[i] = 0
+
+		/* write random (hopefully unique) string to memory */
+		var/seed = rand(0, 65535)
+		var/r = seed
+		for(var/i=1 to PATTERN_LEN)
+			r = JANKYRAND(r)
+			buf[i] = r
+
+		/*  scan memory for string */
+		call("life.dll", "findbuf")("[seed]")
+
+		/* lib will overwrite with new string, if the new string doesn't match
+		   expected string then either didn't find the needle or wrote to
+		   wrong memory address lol */
+		for(var/i=1 to PATTERN_LEN)
+			r = JANKYRAND(r)
+			ASSERT("findbuf err" && buf[i] == r)
+
+		offset = buf[PATTERN_LEN + 1]
+
+		/* init cuda, setup device, pin memory, load kernel. if this fails you
+		   won't get any useful info for debugging */
+		PARAM1 = maxx
+		PARAM2 = maxy
+		call("life.dll", "init")()
+		ASSERT("init err" && PARAM0 == 0)
+
+		initialized = TRUE
+		populate()
+		copy()
+		mainloop()
+
+/proc/populate()
+	var/maxx = world.maxx
+
+	var/list/turfs = block(
+		locate(1, 1, 1),
+		locate(maxx, world.maxy, 1)
+	)
+
+	for(var/turf/t in turfs)
+		var/i = (t.x - 1) + (t.y - 1) * maxx
+		buf[offset + DATA_OFFSET + i] = rand(0, 1)
+
+/proc/copy()
+	var/maxx = world.maxx
+
+	var/list/turfs
+	var/client/c
+
+	for(c in clients)
+		/* not suitable for multiple clients */
+		break
+
+	if(!c)
+		turfs = block(
+			locate(1, 1, 1),
+			locate(world.maxx, world.maxy, 1)
+		)
+
+	else
+		/* mutating appearances is slow, so only refresh the subset of turfs
+		   that are visible */
+		var/list/bounds = c.bounds
+		var/x = round(bounds[1] / world.icon_size)
+		var/y = round(bounds[2] / world.icon_size)
+		var/w = round(bounds[3] / world.icon_size, 1)
+		var/h = round(bounds[4] / world.icon_size, 1)
+
+		turfs = block(
+			locate(max(1, x), max(1, y), 1),
+			locate(min(world.maxx, x + w), min(world.maxy, y + h), 1)
+		)
+
+	for(var/turf/t in turfs)
+		var/i = (t.x - 1) + (t.y - 1) * maxx
+		if(buf[offset + DATA_OFFSET + i] != 0)
+			t.icon = white
+		else
+			t.icon = black
+
+/proc/mainloop()
+	while(TRUE)
+		var/kernel_time = 0
+		var/copy_time = 0
+		var/start
+		var/end
+
+		if(!paused)
+			PARAM1 = world.maxx
+			PARAM2 = world.maxy
+			start = world.tick_usage
+			call("life.dll", "exec_sync")()
+			end = world.tick_usage
+			kernel_time = end - start
+			ASSERT("exec_sync err" && PARAM0 == 0)
+
+			start = world.tick_usage
+			copy()
+			end = world.tick_usage
+			copy_time = end - start
+
+		for(var/client/c in clients)
+			winset(c, "infolabel", list("text"={"\
+frame budget: [100.0 * world.tick_lag]ms
+[paused ? " *** PAUSED *** " : {"\
+kernel time: [kernel_time * world.tick_lag]ms ([kernel_time]%)
+copy time: [copy_time * world.tick_lag]ms ([copy_time]%)
+"}]"}))
+		sleep(world.tick_lag)
